@@ -1,10 +1,7 @@
-# GharPlan AI
-No-login, no-payment home design MVP.
+# GharPlan AI v3
+Architectural-style dimension-rich 2D residential floor-plan concept generator.
 
-## Render
-Python runtime: 3.13 (`runtime.txt`)
-Build command:
-`pip install -r requirements.txt`
+Render build: `pip install -r requirements.txt`
+Render start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-Start command:
-`uvicorn main:app --host 0.0.0.0 --port $PORT`
+Concept only; verify with a licensed professional before construction.
