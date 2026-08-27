@@ -33,6 +33,7 @@ class PlanRequest(BaseModel):
     special_requirements: str = ""
     title: str = "GROUND FLOOR PLAN"
     variation: int = 0
+    wall_type: str = "standard"
 
 
 def esc(v):
@@ -188,179 +189,358 @@ Return only JSON: {{"style":"one_choice","reason":"short phrase"}}
     return fallback, seed, "Local fallback variation"
 
 
+
+def _room(name, x, y, w, h, kind, door="south", window="outer"):
+    """Normalized room geometry. x/y/w/h are fractions of the usable house rectangle."""
+    return {
+        "name": name, "x": x, "y": y, "w": w, "h": h,
+        "kind": kind, "door": door, "window": window
+    }
+
+
 def make_rooms(req, style):
-    # normalized plot coordinates: x,y,w,h in [0,1]
-    rooms=[]
-    bedrooms=max(1,req.bedrooms)
+    """
+    Build a clean, non-overlapping conceptual architectural plan.
+    The geometry uses a house footprint inside the plot and keeps service,
+    bedroom, public and entrance zones separated.
+    """
+    b = max(1, req.bedrooms)
 
-    # Service / parking / garden zones vary by style.
-    if style in ("front_garden","courtyard"):
-        front_h=.22
-        if req.garden: rooms.append(("GARDEN",.02,.02,.36,front_h,"garden"))
-        if req.parking: rooms.append(("CAR PARKING",.40,.02,.26,front_h,"parking"))
-        service_x=.70
-    elif style=="central_living":
-        front_h=.18
-        if req.parking: rooms.append(("CAR PARKING",.02,.02,.24,front_h,"parking"))
-        if req.garden: rooms.append(("GARDEN",.27,.02,.40,front_h,"garden"))
-        service_x=.72
+    # House footprint is deliberately inset from the plot boundary so the
+    # drawing reads like a site/architectural plan rather than touching the road.
+    left, top, right, bottom = 0.08, 0.28, 0.92, 0.88
+    W = right - left
+    H = bottom - top
+
+    rooms = []
+
+    # Public zone: foyer + living + dining.
+    rooms += [
+        _room("FOYER", left + W*.40, top + H*.79, W*.20, H*.21, "foyer", "south"),
+        _room("LIVING ROOM", left + W*.25, top + H*.31, W*.43, H*.38, "living", "east"),
+        _room("DINING", left + W*.52, top + H*.08, W*.23, H*.23, "dining", "south"),
+    ]
+
+    # Left bedroom wing. Up to four bedrooms are stacked with realistic proportions.
+    bx, by, bw = left, top + H*.08, W*.25
+    available_h = H*.78
+    if b <= 2:
+        bed_h = available_h / 2
+        bed_count = b
     else:
-        front_h=.20
-        if req.parking: rooms.append(("CAR PARKING",.72,.02,.26,front_h,"parking"))
-        if req.garden: rooms.append(("GARDEN",.02,.02,.30,front_h,"garden"))
-        service_x=.72
+        bed_count = min(b, 4)
+        bed_h = available_h / bed_count
 
-    # Main living/dining core
-    if style in ("wide_living","central_living","front_garden"):
-        living=(.28, .24, .44, .22)
-    elif style=="compact_core":
-        living=(.26, .25, .34, .24)
-    else:
-        living=(.34, .25, .36, .22)
-    rooms.append(("LIVING ROOM",*living,"living"))
-    rooms.append(("DINING",living[0]+living[2]*.55,living[1],living[2]*.45,living[3],"dining"))
+    for i in range(bed_count):
+        y = by + i*bed_h
+        name = "MASTER BEDROOM" if i == 0 else f"BEDROOM {i+1}"
+        rooms.append(_room(name, bx, y, bw, bed_h-.006, "bedroom", "east", "west"))
 
-    # Bedroom zone
-    if style in ("side_bedrooms","split_bedrooms"):
-        bx,by,bw,bh=.02,.47,.68,.49
-    elif style=="rear_service":
-        bx,by,bw,bh=.02,.49,.67,.47
-    else:
-        bx,by,bw,bh=.02,.50,.68,.46
+    # If more than four bedrooms are requested, put additional bedrooms in the
+    # right/rear wing rather than overlapping existing rooms.
+    extra = b - bed_count
+    for i in range(extra):
+        idx = i + 1
+        rooms.append(_room(f"BEDROOM {bed_count+i+1}",
+                           left + W*.68, top + H*(.55 + i*.16),
+                           W*.24, H*.15, "bedroom", "west", "east"))
 
-    cols=2 if bedrooms>1 else 1
-    rows=math.ceil(bedrooms/cols)
-    gap=.006
-    cw=(bw-gap*(cols-1))/cols
-    ch=(bh-gap*(rows-1))/rows
-    for i in range(bedrooms):
-        r,c=divmod(i,cols)
-        rooms.append(("MASTER BEDROOM" if i==0 else f"BEDROOM {i+1}",
-                      bx+c*(cw+gap),by+r*(ch+gap),cw,ch,"bedroom"))
+    # Service block.
+    rooms.append(_room("KITCHEN", left + W*.68, top + H*.08,
+                       W*.24, H*.23, "kitchen", "south", "east"))
 
-    # Kitchen/service
-    if style=="wide_living":
-        kx,ky,kw,kh=.70,.47,.28,.25
-    elif style=="rear_service":
-        kx,ky,kw,kh=.70,.70,.28,.26
-    else:
-        kx,ky,kw,kh=.70,.49,.28,.25
-    rooms.append(("KITCHEN",kx,ky,kw,kh,"kitchen"))
     if req.utility:
-        rooms.append(("UTILITY",kx,ky+kh+.01,kw*.58,.15,"utility"))
+        rooms.append(_room("UTILITY", left + W*.68, top + H*.31,
+                           W*.12, H*.13, "utility", "south", "east"))
     if req.store:
-        rooms.append(("STORE",kx+kw*.60,ky+kh+.01,kw*.40,.15,"store"))
-    if req.pooja:
-        rooms.append(("POOJA",.70,.34,.13,.12,"pooja"))
-    if req.staircase:
-        rooms.append(("STAIRCASE",.84,.34,.14,.20,"stairs"))
+        rooms.append(_room("STORE", left + W*.80, top + H*.31,
+                           W*.12, H*.13, "store", "south", "east"))
 
-    # Common bath and attached bath are placed in service/central areas.
-    rooms.append(("COMMON TOILET",.70,.25,.13,.12,"bath"))
-    if req.attached_bath and bedrooms:
-        # attached bath for master
-        m=next(r for r in rooms if r[0]=="MASTER BEDROOM")
-        # Room tuple is: (name, x, y, width, height, kind)
-        _, mx, my, mw, mh, _ = m
-        rooms.append(("MASTER BATH",mx+mw*.68,my,mw*.30,mh*.38,"bath"))
+    if req.staircase:
+        rooms.append(_room("STAIRCASE", left + W*.68, top + H*.44,
+                           W*.24, H*.22, "stairs", "south", "east"))
+
+    # Toilets sit against the service/core side.
+    rooms.append(_room("COMMON TOILET", left + W*.68, top + H*.67,
+                       W*.12, H*.13, "bath", "west", "east"))
+
+    if req.attached_bath:
+        # Attached master bath is placed beside the master, never on top of it.
+        m = rooms[0]
+        rooms.append(_room("MASTER BATH",
+                           m["x"] + m["w"]*.55, m["y"],
+                           m["w"]*.45, m["h"]*.42,
+                           "bath", "west", "west"))
+
+    if req.pooja:
+        rooms.append(_room("POOJA ROOM", left + W*.53, top + H*.67,
+                           W*.13, H*.13, "pooja", "south", "north"))
 
     if req.balcony:
-        rooms.append(("BALCONY",.34,.92,.36,.06,"balcony"))
+        rooms.append(_room("BALCONY", left + W*.29, bottom,
+                           W*.42, .045, "balcony", "north", "south"))
 
     return rooms
+
+
+def door_symbol(x, y, w, h, side="south", door_w=0.82):
+    """CAD-style door leaf + swing arc. Coordinates are SVG pixels."""
+    s = []
+    d = min(w, h) * .18
+    if side == "south":
+        gx = x + w*.5
+        gy = y + h
+        dw = min(w*.32, 62)
+        s.append(line(gx-dw/2, gy, gx+dw/2, gy, "#fff", 8))
+        s.append(line(gx, gy, gx, gy-dw, "#333", 2))
+        s.append(f'<path d="M{gx-dw/2:.1f},{gy:.1f} A{dw/2:.1f},{dw/2:.1f} 0 0 1 {gx:.1f},{gy-dw:.1f}" fill="none" stroke="#555" stroke-width="1.5"/>')
+    elif side == "north":
+        gx = x + w*.5
+        gy = y
+        dw = min(w*.32, 62)
+        s.append(line(gx-dw/2, gy, gx+dw/2, gy, "#fff", 8))
+        s.append(line(gx, gy, gx, gy+dw, "#333", 2))
+        s.append(f'<path d="M{gx-dw/2:.1f},{gy:.1f} A{dw/2:.1f},{dw/2:.1f} 0 0 0 {gx:.1f},{gy+dw:.1f}" fill="none" stroke="#555" stroke-width="1.5"/>')
+    elif side == "east":
+        gx = x + w
+        gy = y + h*.5
+        dw = min(h*.32, 62)
+        s.append(line(gx, gy-dw/2, gx, gy+dw/2, "#fff", 8))
+        s.append(line(gx, gy, gx-dw, gy, "#333", 2))
+        s.append(f'<path d="M{gx:.1f},{gy-dw/2:.1f} A{dw/2:.1f},{dw/2:.1f} 0 0 0 {gx-dw:.1f},{gy:.1f}" fill="none" stroke="#555" stroke-width="1.5"/>')
+    else:
+        gx = x
+        gy = y + h*.5
+        dw = min(h*.32, 62)
+        s.append(line(gx, gy-dw/2, gx, gy+dw/2, "#fff", 8))
+        s.append(line(gx, gy, gx+dw, gy, "#333", 2))
+        s.append(f'<path d="M{gx:.1f},{gy-dw/2:.1f} A{dw/2:.1f},{dw/2:.1f} 0 0 1 {gx+dw:.1f},{gy:.1f}" fill="none" stroke="#555" stroke-width="1.5"/>')
+    return "".join(s)
+
+
+def window_symbol(x, y, w, h, side):
+    """Double-line window opening."""
+    s = []
+    if side in ("north", "south"):
+        ww = max(34, min(w*.32, 100))
+        cx = x + w/2
+        yy = y if side == "north" else y+h
+        s.append(line(cx-ww/2, yy, cx+ww/2, yy, "#fff", 10))
+        s.append(line(cx-ww/2, yy-3 if side=="north" else yy+3,
+                      cx+ww/2, yy-3 if side=="north" else yy+3, "#555", 2))
+        s.append(line(cx, yy-8 if side=="north" else yy+8,
+                      cx, yy+8 if side=="north" else yy-8, "#777", 1.5))
+    else:
+        wh = max(34, min(h*.32, 100))
+        cy = y+h/2
+        xx = x if side == "west" else x+w
+        s.append(line(xx, cy-wh/2, xx, cy+wh/2, "#fff", 10))
+        s.append(line(xx-3 if side=="west" else xx+3, cy-wh/2,
+                      xx-3 if side=="west" else xx+3, cy+wh/2, "#555", 2))
+        s.append(line(xx-8 if side=="west" else xx+8, cy,
+                      xx+8 if side=="west" else xx-8, cy, "#777", 1.5))
+    return "".join(s)
+
+
+def room_area_text(req, r):
+    rw = max(.1, r["w"] * req.plot_width * .84)
+    rh = max(.1, r["h"] * req.plot_length * .60)
+    return f'{rw:.0f}\'-0" X {rh:.0f}\'-0"'
+
+
+def furniture_for_room(r, x, y, w, h):
+    k = r["kind"]
+    if k == "bedroom":
+        return bed_symbol(x, y, w, h)
+    if k == "living":
+        return sofa_symbol(x, y, w, h)
+    if k == "dining":
+        return table_symbol(x, y, w, h)
+    if k == "kitchen":
+        return kitchen_symbol(x, y, w, h)
+    if k == "bath":
+        return toilet_symbol(x+w*.34, y+h*.64) + basin(x+w*.70, y+h*.52)
+    if k == "stairs":
+        return stair_symbol(x+12, y+12, max(40,w-24), max(50,h-24))
+    if k == "foyer":
+        return rect(x+w*.30, y+h*.38, w*.40, h*.20, "#777", "white", 1.5)
+    return ""
+
+
+def site_zone(req, x, y, w, h, name, kind):
+    s = [rect(x, y, w, h, "#333", "#fafafa", 2)]
+    s.append(room_name(x+w/2, y+h*.42, name, 14))
+    if kind == "parking":
+        if req.special_requirements and "two cars" in req.special_requirements.lower():
+            s.append(car_symbol(x+w*.17, y+h*.40, w*.25, h*.43))
+            s.append(car_symbol(x+w*.58, y+h*.40, w*.25, h*.43))
+        else:
+            s.append(car_symbol(x+w*.35, y+h*.40, w*.30, h*.43))
+    elif kind == "garden":
+        for i in range(6):
+            s.append(f'<circle cx="{x+22+i*w/6:.1f}" cy="{y+h*.18:.1f}" r="9" fill="none" stroke="#555" stroke-width="2"/>')
+        s.append(line(x+15, y+h*.75, x+w-15, y+h*.75, "#888", 1, "6 5"))
+    return "".join(s)
 
 
 def generate_plan(req: PlanRequest):
     style, seed, reason = ai_style(req)
 
-    # Architectural sheet: wide enough for desktop, scales responsively on mobile.
-    W,H=1800,1320
-    L,T,R,B=150,160,1650,1030
-    PW,PH=R-L,B-T
-    sx,sy=PW/req.plot_width,PH/req.plot_length
+    W, H = 1900, 1400
+    L, T, R, B = 125, 175, 1775, 1045
+    PW, PH = R-L, B-T
 
-    s=[f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="100%" height="auto" preserveAspectRatio="xMidYMid meet">',
-       '<rect width="1800" height="1320" fill="white"/>']
-    s.append(txt(W/2,42,f"{req.title} - {req.bedrooms}BHK",27,"bold"))
-    s.append(txt(W/2,70,f'PLOT SIZE - {req.plot_width:g}\'-0" X {req.plot_length:g}\'-0" | ORIENTATION - {req.orientation}',15))
-    s.append(rect(L,T,PW,PH,"#111","white",6))
+    s = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="100%" height="auto">',
+        '<rect width="1900" height="1400" fill="white"/>',
+        txt(W/2, 42, f"{req.title} — {req.bedrooms}BHK RESIDENCE", 28, "bold"),
+        txt(W/2, 70, f'PLOT {req.plot_width:g}\'-0" × {req.plot_length:g}\'-0"  |  ROAD / FACING: {req.orientation}', 15),
+    ]
 
-    rooms=make_rooms(req,style)
-    for name,nx,ny,nw,nh,kind in rooms:
-        x=L+nx*PW; y=T+ny*PH; w=nw*PW; h=nh*PH
-        rw=max(4,nw*req.plot_width); rh=max(4,nh*req.plot_length)
-        fill={"garden":"#f4f4f4","parking":"#fafafa","bedroom":"#fff",
-              "living":"#fff","dining":"#fff","kitchen":"#fff","utility":"#fff",
-              "store":"#fff","bath":"#fff","stairs":"#fff","pooja":"#fff",
-              "balcony":"#f8f8f8"}.get(kind,"white")
-        if kind=="garden":
-            s.append(rect(x,y,w,h,"#444",fill,3))
-            s.append(room_name(x+w/2,y+h*.45,name,16))
-            s.append(txt(x+w/2,y+h*.45+24,f'{rw:.0f}\'-0" X {rh:.0f}\'-0"',12))
-            for i in range(5):
-                s.append(f'<circle cx="{x+28+i*38:.1f}" cy="{y+30:.1f}" r="12" fill="#ddd" stroke="#555"/>')
-        elif kind=="parking":
-            s.append(rect(x,y,w,h,"#222",fill,3))
-            s.append(room_name(x+w/2,y+h*.35,name,15))
-            s.append(txt(x+w/2,y+h*.35+23,f'{rw:.0f}\'-0" X {rh:.0f}\'-0"',12))
-            s.append(car_symbol(x+w*.38,y+h*.46,w*.25,h*.43))
-        elif kind=="bedroom":
-            s.append(label_box(x,y,w,h,name,rw,rh,"white",bed_symbol))
-        elif kind=="living":
-            s.append(label_box(x,y,w,h,name,rw,rh,"white",sofa_symbol))
-        elif kind=="dining":
-            s.append(label_box(x,y,w,h,name,rw,rh,"white",table_symbol))
-        elif kind=="kitchen":
-            s.append(label_box(x,y,w,h,name,rw,rh,"white",kitchen_symbol))
-        elif kind=="bath":
-            s.append(rect(x,y,w,h,"#222","white",3))
-            s.append(room_name(x+w/2,y+h*.30,name,11))
-            s.append(toilet_symbol(x+w*.34,y+h*.66)); s.append(basin(x+w*.70,y+h*.60))
-        elif kind=="stairs":
-            s.append(rect(x,y,w,h,"#222","white",3)); s.append(stair_symbol(x+10,y+8,w-20,h-20))
-        else:
-            s.append(label_box(x,y,w,h,name,rw,rh,"white",None))
+    # Plot/site boundary and setbacks.
+    s.append(rect(L, T, PW, PH, "#111", "white", 6))
+    setback = 28
+    s.append(rect(L+setback, T+setback, PW-2*setback, PH-2*setback, "#999", "none", 1.2, 0))
 
-    # Doors/windows: architectural symbols placed around major perimeter edges.
-    s.append(line(L+PW*.18,T,L+PW*.18,T+18,"#555",7))
-    s.append(line(L+PW*.55,B-5,L+PW*.62,B-5,"#555",7))
-    s.append(line(L+5,T+PH*.55,L+5,T+PH*.66,"#555",7))
-    s.append(line(R-5,T+PH*.35,R-5,T+PH*.47,"#555",7))
+    # Site zones.
+    front_y = T + 20
+    front_h = PH*.20
+    if req.garden:
+        s.append(site_zone(req, L+25, front_y, PW*.34, front_h, "GARDEN", "garden"))
+    if req.parking:
+        px = L + PW*.62 if req.garden else L+25
+        s.append(site_zone(req, px, front_y, PW*.30, front_h, "CAR PARKING", "parking"))
 
-    # Main entrance at the side corresponding to requested orientation.
-    if req.orientation=="N":
-        ex,ey=L+PW*.48,T
-        s.append(txt(ex,ey-28,"MAIN ENTRANCE",14,"bold"))
-    elif req.orientation=="S":
-        ex,ey=L+PW*.48,B
-        s.append(txt(ex,ey+28,"MAIN ENTRANCE",14,"bold"))
-    elif req.orientation=="E":
-        ex,ey=R,T+PH*.55
-        s.append(txt(ex+70,ey,"MAIN ENTRANCE",14,"bold","start"))
+    # Main house footprint.
+    house_x = L + PW*.08
+    house_y = T + PH*.28
+    house_w = PW*.84
+    house_h = PH*.60
+    wall_sizes = {
+        "standard": (8, 4.5),
+        "thick": (11, 6),
+        "thin": (6, 4),
+        "rcc_infill": (8, 4.5),
+    }
+    wall, inner = wall_sizes.get(req.wall_type, wall_sizes["standard"])
+    s.append(rect(house_x, house_y, house_w, house_h, "#111", "white", wall))
+
+    rooms = make_rooms(req, style)
+
+    # Room fills and partitions.
+    for r in rooms:
+        x = house_x + r["x"] * PW
+        y = T + r["y"] * PH
+        w = r["w"] * PW
+        h = r["h"] * PH
+        s.append(rect(x, y, w, h, "#333", "#fff", 5))
+        fs = 15 if min(w,h) > 125 else 11
+        s.append(room_name(x+w/2, y+min(34,h*.25), r["name"], fs))
+        s.append(txt(x+w/2, y+min(56,h*.25+22), room_area_text(req, r), max(9, fs-2), "normal"))
+        furn = furniture_for_room(r, x, y, w, h)
+        if furn:
+            s.append(furn)
+
+    # Doors on internal circulation edges.
+    for r in rooms:
+        x = house_x + r["x"] * PW
+        y = T + r["y"] * PH
+        w = r["w"] * PW
+        h = r["h"] * PH
+        s.append(door_symbol(x, y, w, h, r["door"]))
+
+    # Perimeter windows based on exposed sides.
+    for r in rooms:
+        x = house_x + r["x"] * PW
+        y = T + r["y"] * PH
+        w = r["w"] * PW
+        h = r["h"] * PH
+        side = r["window"]
+        if side == "west" and abs(x-house_x) < 4:
+            s.append(window_symbol(x, y, w, h, "west"))
+        elif side == "east" and abs((x+w)-(house_x+house_w)) < 4:
+            s.append(window_symbol(x, y, w, h, "east"))
+        elif side == "north" and abs(y-house_y) < 4:
+            s.append(window_symbol(x, y, w, h, "north"))
+        elif side == "south" and abs((y+h)-(house_y+house_h)) < 4:
+            s.append(window_symbol(x, y, w, h, "south"))
+
+    # Main entrance + porch/verandah.
+    if req.orientation == "N":
+        ex, ey = house_x+house_w*.50, house_y
+        s.append(door_symbol(ex-house_w*.04, ey-1, house_w*.08, 20, "north"))
+        s.append(txt(ex, ey-24, "MAIN ENTRANCE", 13, "bold"))
+    elif req.orientation == "S":
+        ex, ey = house_x+house_w*.50, house_y+house_h
+        s.append(door_symbol(ex-house_w*.04, ey-20, house_w*.08, 20, "south"))
+        s.append(txt(ex, ey+34, "MAIN ENTRANCE", 13, "bold"))
+    elif req.orientation == "E":
+        ex, ey = house_x+house_w, house_y+house_h*.50
+        s.append(door_symbol(ex-20, ey-house_h*.04, 20, house_h*.08, "east"))
+        s.append(txt(ex+55, ey, "MAIN ENTRANCE", 13, "bold", "start"))
     else:
-        ex,ey=L,T+PH*.55
-        s.append(txt(ex-70,ey,"MAIN ENTRANCE",14,"bold","end"))
+        ex, ey = house_x, house_y+house_h*.50
+        s.append(door_symbol(ex, ey-house_h*.04, 20, house_h*.08, "west"))
+        s.append(txt(ex-55, ey, "MAIN ENTRANCE", 13, "bold", "end"))
 
-    s.append(dim_h(L,R,T-42,f'{req.plot_width:g}\'-0"'))
-    s.append(dim_v(T,B,L-42,f'{req.plot_length:g}\'-0"'))
-    s.append(compass(1560,1175,req.orientation))
+    # Balcony/verandah outline.
+    if req.balcony:
+        bx = house_x + house_w*.28
+        by = house_y + house_h
+        bw = house_w*.44
+        bh = 55
+        s.append(rect(bx, by, bw, bh, "#555", "#fafafa", 3))
+        s.append(txt(bx+bw/2, by+31, "BALCONY / VERANDAH", 13, "bold"))
+    else:
+        bx = house_x + house_w*.34
+        by = house_y + house_h
+        bw = house_w*.32
+        bh = 45
+        s.append(rect(bx, by, bw, bh, "#555", "#fafafa", 3))
+        s.append(txt(bx+bw/2, by+27, "VERANDAH", 12, "bold"))
 
-    # Title / notes block.
-    by=1110
-    s.append(rect(40,by,1210,165,"#222","white",2))
-    s.append(txt(60,by+32,f"{req.title} ({req.bedrooms}BHK HOUSE)",18,"bold","start"))
-    s.append(txt(60,by+62,f'PLOT SIZE - {req.plot_width:g}\'-0" X {req.plot_length:g}\'-0"',14,"normal","start"))
-    s.append(txt(60,by+90,f"TOTAL PLOT AREA - {req.plot_width*req.plot_length:,.0f} SQ.FT.",14,"normal","start"))
-    s.append(txt(60,by+118,f"LAYOUT VARIATION - {seed}",13,"normal","start"))
-    s.append(txt(60,by+145,"CONCEPTUAL ARCHITECTURAL FLOOR PLAN - NOT FOR CONSTRUCTION",12,"normal","start"))
+    # Dimension chains.
+    s.append(dim_h(L, R, T-42, f'{req.plot_width:g}\'-0"'))
+    s.append(dim_v(T, B, L-45, f'{req.plot_length:g}\'-0"'))
+    s.append(dim_h(house_x, house_x+house_w, house_y-24,
+                   f'{req.plot_width*.84:g}\'-0"'))
+    s.append(dim_v(house_y, house_y+house_h, house_x-24,
+                   f'{req.plot_length*.60:g}\'-0"'))
 
-    s.append(rect(1270,by,490,165,"#222","white",2))
-    s.append(txt(1290,by+30,"DESIGN NOTES",16,"bold","start"))
-    notes=["AI-assisted space-planning variation","Dimensions are approximate","Verify setbacks/by-laws locally","Final working drawing by qualified architect"]
-    for i,n in enumerate(notes):
-        s.append(txt(1290,by+58+i*25,n,11,"normal","start"))
+    # North arrow.
+    s.append(compass(1660, 1180, req.orientation))
 
-    s.append(txt(W/2,1295,f"Architectural Floor Plan Generator  •  by ANIK KUMAR",14,"bold"))
+    # Professional title block.
+    by = 1115
+    s.append(rect(35, by, 1310, 210, "#222", "white", 2))
+    s.append(txt(55, by+30, f"{req.title} — {req.bedrooms}BHK HOUSE", 18, "bold", "start"))
+    s.append(txt(55, by+58, f'PLOT SIZE: {req.plot_width:g}\'-0" × {req.plot_length:g}\'-0"', 13, "normal", "start"))
+    s.append(txt(55, by+83, f"PLOT AREA: {req.plot_width*req.plot_length:,.0f} SQ.FT.", 13, "normal", "start"))
+    s.append(txt(55, by+108, f"ORIENTATION: {req.orientation}   |   FLOORS: {req.floors}", 13, "normal", "start"))
+    s.append(txt(55, by+133, f"LAYOUT TYPE: {style.upper()}   |   VARIATION: {seed}", 12, "normal", "start"))
+    wall_labels = {
+        "standard": '9" external / 4.5" internal',
+        "thick": '9" external / 6" internal',
+        "thin": '6" external / 4.5" internal',
+        "rcc_infill": '9" external / 4.5" internal — RCC frame/infill concept',
+    }
+    wall_label = wall_labels.get(req.wall_type, wall_labels["standard"])
+    s.append(txt(55, by+158, f"WALLS: {wall_label.upper()} (CONCEPTUAL)", 11, "normal", "start"))
+    s.append(txt(55, by+182, "CONCEPTUAL DESIGN — VERIFY STRUCTURE, SETBACKS AND LOCAL BY-LAWS BEFORE CONSTRUCTION", 10, "bold", "start"))
+
+    s.append(rect(1370, by, 495, 210, "#222", "white", 2))
+    s.append(txt(1390, by+30, "ARCHITECTURAL NOTES", 16, "bold", "start"))
+    notes = [
+        "• CAD-style wall, door and window graphics",
+        "• Furniture and sanitary fixtures shown",
+        "• Dimensioned site and house footprint",
+        "• Final working drawing by licensed architect",
+        f"• Layout strategy: {reason}",
+    ]
+    for i, n in enumerate(notes):
+        s.append(txt(1390, by+61+i*27, n, 11, "normal", "start"))
+
+    s.append(txt(950, 1375, "GHARPLAN AI  •  ARCHITECTURAL FLOOR PLAN GENERATOR  •  BY ANIK KUMAR", 13, "bold"))
     s.append("</svg>")
     return "".join(s)
 
@@ -409,6 +589,12 @@ button:disabled{opacity:.6;cursor:wait}
 <div><label>Plot Length (ft)</label><input id="plot_length" type="number" value="50" min="21" max="500" step="0.5"></div>
 <div><label>Road / Main Orientation</label><select id="orientation"><option value="N">North</option><option value="E">East</option><option value="S">South</option><option value="W">West</option></select></div>
 <div><label>Planning Preference</label><select id="vastu"><option value="false">Flexible</option><option value="true">Vastu-conscious</option></select></div>
+<div><label>Wall Type</label><select id="wall_type">
+<option value="standard">Standard Masonry — 9" External / 4.5" Internal</option>
+<option value="thick">Heavy Wall — 9" External / 6" Internal</option>
+<option value="thin">Light Wall — 6" External / 4.5" Internal</option>
+<option value="rcc_infill">RCC Frame + Infill — Concept</option>
+</select></div>
 <div class="full"><label>Required Spaces</label>
 <div class="checks">
 <label class="check"><input id="parking" type="checkbox" checked>Car Parking</label>
