@@ -6,13 +6,14 @@ from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
-from openai import OpenAI
+from google import genai
 
 app = FastAPI(title="GharPlan AI")
 
-# Put OPENAI_API_KEY in Render -> Environment.
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+# Put GEMINI_API_KEY in Render -> Environment.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
 
 VARIATIONS = [
     "Use a compact zoning arrangement with excellent circulation and a strong central living/dining core.",
@@ -314,7 +315,7 @@ form.addEventListener("submit",async(e)=>{
   }catch(err){
     statusEl.className="error";
     statusEl.textContent="Generation failed: "+err.message;
-    result.innerHTML="<p>Please check the OpenAI API key and Render logs.</p>";
+    result.innerHTML="<p>Please check the Gemini API key and Render logs.</p>";
   }finally{
     btn.disabled=false;
     btn.textContent="GENERATE AI FLOOR PLAN";
@@ -331,45 +332,57 @@ async def home():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "ai_enabled": bool(client)}
+    return {"status": "ok", "ai_enabled": bool(client), "image_model": GEMINI_IMAGE_MODEL}
 
 @app.post("/api/generate")
 async def generate_plan(req: PlanRequest):
     if not client:
         return JSONResponse(
             status_code=500,
-            content={"detail": "OPENAI_API_KEY is not configured on the server."}
+            content={"detail": "GEMINI_API_KEY is not configured on the server."}
         )
 
-    # A fresh variation instruction is selected on every request.
+    # A fresh variation instruction is selected on every request so repeated
+    # clicks can produce different architectural compositions.
     variation = random.choice(VARIATIONS)
     variation += f" Generation timestamp: {datetime.utcnow().isoformat()}"
 
     prompt = build_prompt(req, variation)
 
     try:
-        # The OpenAI image model creates the actual plan image.
-        response = client.images.generate(
-            model="gpt-image-1.5",
-            prompt=prompt,
-            size="1536x1024",
-            quality="high",
-            output_format="png"
+        # Google Gemini native image generation (Nano Banana 2).
+        # The generated image is returned as base64 data by the Interactions API.
+        interaction = client.interactions.create(
+            model=GEMINI_IMAGE_MODEL,
+            input=prompt,
+            response_format={
+                "type": "image",
+                "mime_type": "image/png",
+                "aspect_ratio": "16:9",
+                "image_size": "2K",
+            },
         )
 
-        b64 = response.data[0].b64_json
+        generated_image = getattr(interaction, "output_image", None)
+        if not generated_image or not getattr(generated_image, "data", None):
+            raise RuntimeError("Gemini returned no image. Please try generating again.")
+
+        # Validate that the returned data is valid base64 before sending it to
+        # the browser as a data URL.
+        b64 = generated_image.data
+        base64.b64decode(b64, validate=True)
         image_data = "data:image/png;base64," + b64
 
         return {
             "ok": True,
             "image": image_data,
-            "model": "gpt-image-1.5",
-            "variation": variation
+            "model": GEMINI_IMAGE_MODEL,
+            "variation": variation,
         }
 
     except Exception as exc:
-        # Do not expose the API key or internal secrets.
+        # Do not expose the Gemini API key or other secrets.
         return JSONResponse(
             status_code=502,
-            content={"detail": f"OpenAI image generation failed: {str(exc)}"}
+            content={"detail": f"Gemini image generation failed: {str(exc)}"}
         )
