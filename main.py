@@ -260,7 +260,8 @@ def make_rooms(req, style):
     if req.attached_bath and bedrooms:
         # attached bath for master
         m=next(r for r in rooms if r[0]=="MASTER BEDROOM")
-        mx,my,mw,mh,_=m
+        # Room tuple is: (name, x, y, width, height, kind)
+        _, mx, my, mw, mh, _ = m
         rooms.append(("MASTER BATH",mx+mw*.68,my,mw*.30,mh*.38,"bath"))
 
     if req.balcony:
