@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 from html import escape
@@ -6,6 +6,7 @@ import json
 import os
 import random
 import math
+import base64
 
 try:
     from openai import OpenAI
@@ -545,6 +546,89 @@ def generate_plan(req: PlanRequest):
     return "".join(s)
 
 
+def generate_ai_drawing(req: PlanRequest) -> bytes:
+    """Use OpenAI to create the actual customer-specific architectural drawing."""
+    if OpenAI is None:
+        raise RuntimeError("OpenAI Python package is not installed.")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
+
+    client = OpenAI(api_key=api_key)
+
+    wall_options = {
+        "standard": 'standard masonry, approximately 9 inch external and 4.5 inch internal walls',
+        "thick": 'heavy masonry, approximately 9 inch external and 6 inch internal walls',
+        "thin": 'lighter masonry, approximately 6 inch external and 4.5 inch internal walls',
+        "rcc_infill": 'RCC frame with masonry infill, conceptual 9 inch / 4.5 inch arrangement',
+    }
+
+    spaces = []
+    if req.parking: spaces.append("car parking")
+    if req.garden: spaces.append("garden")
+    if req.attached_bath: spaces.append("attached master bathroom")
+    if req.utility: spaces.append("utility")
+    if req.staircase: spaces.append("staircase")
+    if req.store: spaces.append("store")
+    if req.pooja: spaces.append("pooja room")
+    if req.balcony: spaces.append("balcony")
+
+    seed = req.variation or random.randint(1, 999999999)
+
+    prompt = f"""
+Create a completely new professional architectural 2D floor-plan drawing for this
+customer. The AI must design the actual drawing from the requirements below.
+Do NOT use a fixed template and do NOT simply rearrange a predefined drawing.
+
+CUSTOMER REQUIREMENTS
+• {req.bedrooms} BHK residential house
+• Plot: {req.plot_width:g} ft × {req.plot_length:g} ft
+• Road / main orientation: {req.orientation}
+• Number of floors: {req.floors}
+• Vastu: {"yes, use Vastu-conscious zoning" if req.vastu else "no, flexible planning"}
+• Wall choice: {wall_options.get(req.wall_type, wall_options["standard"])}
+• Required additional spaces: {", ".join(spaces) if spaces else "none"}
+• Special requirements: {req.special_requirements or "Arrange all rooms efficiently and comfortably."}
+
+ARCHITECTURAL DESIGN INSTRUCTIONS
+Design the plan as an experienced residential architect:
+- Make an intelligent, customer-specific room arrangement.
+- Use realistic room proportions and circulation.
+- Keep all rooms, walls, doors and furniture non-overlapping.
+- Give every requested room a logical location.
+- Provide practical entrance, foyer, living, dining, kitchen and service relationships.
+- Provide bedroom privacy and sensible bathroom access.
+- Place stairs logically when requested.
+- Place parking, garden, setbacks and open spaces within the plot.
+- Include doors with swing arcs and windows on appropriate external walls.
+- Include beds, sofas, dining table, kitchen counters, sanitary fixtures and staircase.
+- Include room names and approximate dimensions in feet/inches.
+- Include plot dimensions, major building dimensions, north arrow and a professional title block.
+- Use a clean black-and-white CAD/architectural drafting appearance with subtle gray fills.
+- Top-down orthographic 2D floor plan only. No 3D perspective and no exterior render.
+- Do not add optional rooms unless necessary for basic residential function.
+- Never omit a requested room.
+- Make this layout meaningfully different from previous generations.
+
+IMPORTANT:
+This is a conceptual architectural design, not a construction/sanctioned drawing.
+Use variation seed {seed} to create a fresh arrangement.
+"""
+    model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    result = client.images.generate(
+        model=model,
+        prompt=prompt,
+        size="1536x1024",
+        quality=os.getenv("OPENAI_IMAGE_QUALITY", "high"),
+    )
+    if not getattr(result, "data", None):
+        raise RuntimeError("OpenAI returned no image.")
+    b64 = getattr(result.data[0], "b64_json", None)
+    if not b64:
+        raise RuntimeError("OpenAI image response did not contain image data.")
+    return base64.b64decode(b64)
+
+
 HTML = r"""
 <!DOCTYPE html>
 <html>
@@ -625,8 +709,8 @@ async function generatePlan(){
 
  variation++;
  btn.disabled=true;
- btn.textContent="GENERATING NEW PLAN...";
- result.innerHTML='<div class="status">Creating a new architectural layout...</div>';
+ btn.textContent="AI IS DESIGNING YOUR PLAN...";
+ result.innerHTML='<div class="status">AI is designing your floor plan from your requirements...</div>';
 
  const data={
   bedrooms, plot_width:width, plot_length:length,
@@ -652,11 +736,11 @@ async function generatePlan(){
     try{const e=await response.json();detail=e.detail||""}catch(_){}
     throw new Error(detail||("Server returned "+response.status));
   }
-  const svg=await response.text();
-  const blob=new Blob([svg],{type:"image/svg+xml"});
-  const url=URL.createObjectURL(blob);
-  result.innerHTML='<h3>Generated Plan - Variation '+variation+'</h3><div id="planWrap">'+svg+
-    '</div><a class="download" href="'+url+'" download="gharplan-variation-'+variation+'.svg">DOWNLOAD PLAN</a>';
+  const imageBlob=await response.blob();
+  const url=URL.createObjectURL(imageBlob);
+  result.innerHTML='<h3>AI Generated Plan - Variation '+variation+'</h3>'+
+    '<div id="planWrap"><img src="'+url+'" alt="AI generated architectural floor plan" style="display:block;width:100%;height:auto"></div>'+
+    '<a class="download" href="'+url+'" download="gharplan-ai-variation-'+variation+'.png">DOWNLOAD AI PLAN</a>';
  }catch(error){
   result.innerHTML='<h3 style="color:red">Generation failed</h3><p>'+String(error.message).replace(/[<>]/g,"")+'</p>';
  }finally{
@@ -676,9 +760,18 @@ def home():
 
 @app.post("/generate")
 def generate(req: PlanRequest):
-    return Response(content=generate_plan(req), media_type="image/svg+xml")
+    try:
+        image_bytes = generate_ai_drawing(req)
+        return Response(
+            content=image_bytes,
+            media_type="image/png",
+            headers={"Content-Disposition": "inline; filename=gharplan-ai.png"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 
 @app.get("/health")
 def health():
-    return {"status":"ok","service":"GharPlan AI","ai_enabled":bool(os.getenv("OPENAI_API_KEY"))}
+    return {"status":"ok","service":"GharPlan AI","ai_enabled":bool(os.getenv("OPENAI_API_KEY")),"image_model":os.getenv("OPENAI_IMAGE_MODEL","gpt-image-2")}
