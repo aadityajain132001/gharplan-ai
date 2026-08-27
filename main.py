@@ -12,8 +12,8 @@ class PlanRequest(BaseModel):
     contact_number: str = Field(default="", min_length=5, max_length=30)
     email: str = Field(default="", max_length=150)
     bedrooms: int = Field(default=3, ge=1, le=6)
-    plot_width: float = Field(default=70, gt=20, le=150)
-    plot_length: float = Field(default=50, gt=20, le=150)
+    plot_width: float = Field(default=70, ge=20, le=150)
+    plot_length: float = Field(default=50, ge=20, le=150)
     parking: bool = True
     garden: bool = True
     attached_bath: bool = True
@@ -24,6 +24,11 @@ class PlanRequest(BaseModel):
     wall_type: str = "Standard masonry wall"
     vastu: str = "Not specified"
     special_requirements: str = ""
+    house_type: str = "Independent House"
+    floors: str = "Ground Floor"
+    store: bool = True
+    pooja: bool = False
+    balcony: bool = False
 
 
 def rect(x, y, w, h, stroke="#111", fill="white", sw=3):
@@ -375,7 +380,22 @@ button{border:0;border-radius:11px;padding:15px 22px;font-size:16px;font-weight:
 <script>
 function continueToRequirements(){const name=document.getElementById('customer_name').value.trim();const phone=document.getElementById('contact_number').value.trim();if(!name){alert('Please enter your full name.');return}if(!phone){alert('Please enter your contact number.');return}document.getElementById('customerPage').classList.remove('active');document.getElementById('requirementsPage').classList.add('active');document.getElementById('step1').classList.remove('active');document.getElementById('step2').classList.add('active');window.scrollTo({top:0,behavior:'smooth'})}
 function showCustomerPage(){document.getElementById('requirementsPage').classList.remove('active');document.getElementById('customerPage').classList.add('active');document.getElementById('step2').classList.remove('active');document.getElementById('step1').classList.add('active');window.scrollTo({top:0,behavior:'smooth'})}
-async function submitRequirements(){const payload={customer_name:document.getElementById('customer_name').value.trim(),contact_number:document.getElementById('contact_number').value.trim(),email:document.getElementById('email').value.trim(),bedrooms:parseInt(document.getElementById('bedrooms').value),plot_width:parseFloat(document.getElementById('plot_width').value),plot_length:parseFloat(document.getElementById('plot_length').value),orientation:document.getElementById('orientation').value,parking:document.getElementById('parking').value==='true',garden:document.getElementById('garden').value==='true',attached_bath:document.getElementById('attached_bath').value==='true',utility:document.getElementById('utility').value==='true',staircase:document.getElementById('staircase').value==='true',wall_type:document.getElementById('wall_type').value,vastu:document.getElementById('vastu').value,special_requirements:document.getElementById('special_requirements').value.trim(),title:'GROUND FLOOR PLAN'};try{const response=await fetch('/submit-requirements',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Submission failed');document.getElementById('thankYou').classList.add('show')}catch(error){alert('Unable to submit requirements: '+error.message)}}
+async function submitRequirements(){const payload={customer_name:document.getElementById('customer_name').value.trim(),contact_number:document.getElementById('contact_number').value.trim(),email:document.getElementById('email').value.trim(),bedrooms:parseInt(document.getElementById('bedrooms').value),plot_width:parseFloat(document.getElementById('plot_width').value),plot_length:parseFloat(document.getElementById('plot_length').value),orientation:document.getElementById('orientation').value,house_type:document.getElementById('house_type').value,floors:document.getElementById('floors').value,store:document.getElementById('store').value==='true',pooja:document.getElementById('pooja').value==='true',balcony:document.getElementById('balcony').value==='true',parking:document.getElementById('parking').value==='true',garden:document.getElementById('garden').value==='true',attached_bath:document.getElementById('attached_bath').value==='true',utility:document.getElementById('utility').value==='true',staircase:document.getElementById('staircase').value==='true',wall_type:document.getElementById('wall_type').value,vastu:document.getElementById('vastu').value,special_requirements:document.getElementById('special_requirements').value.trim(),title:'GROUND FLOOR PLAN'};try{const response=await fetch('/submit-requirements',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await response.json();
+if(!response.ok){
+  let message='Submission failed. Please check your details.';
+  if(Array.isArray(data.detail)){
+    message=data.detail.map(e=>{
+      const loc=Array.isArray(e.loc)?e.loc.join(' → '):'';
+      return loc ? loc+': '+(e.msg||'Invalid value') : (e.msg||'Invalid value');
+    }).join('\\n');
+  }else if(typeof data.detail==='string'){
+    message=data.detail;
+  }else if(data.message){
+    message=data.message;
+  }
+  throw new Error(message);
+}
+document.getElementById('thankYou').classList.add('show')}catch(error){alert('Unable to submit requirements:\\n'+error.message)}}
 function closeThankYou(){document.getElementById('thankYou').classList.remove('show')}
 </script>
 </body></html>
